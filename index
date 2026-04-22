@@ -1,0 +1,134 @@
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const Anthropic = require('@anthropic-ai/sdk');
+const pino = require('pino');
+const fs = require('fs');
+
+// ─── CONFIG ────────────────────────────────────────────────────────────────────
+const CONFIG = {
+  ANTHROPIC_API_KEY: 'SUA_CHAVE_ANTHROPIC_AQUI', // Gere em console.anthropic.com
+  GROUP_NAME: 'Suporte Hafy 💎',                  // Nome exato do grupo
+  BOT_TRIGGER: '@bot',                             // Palavra para acionar o bot
+  RESPOND_TO_ALL: false,                           // false = só responde quando mencionado
+  BOT_NAME: 'Hafy AI',
+  SYSTEM_PROMPT: `Você é o assistente oficial do grupo "Suporte Hafy 💎".
+Seu nome é Hafy AI. Responda sempre em português, de forma clara e objetiva.
+Ajude com suporte técnico, dúvidas sobre scripts Roblox, executors e desenvolvimento Lua.
+Seja direto e profissional.`,
+};
+// ────────────────────────────────────────────────────────────────────────────────
+
+const anthropic = new Anthropic({ apiKey: CONFIG.ANTHROPIC_API_KEY });
+
+// Histórico por usuário (últimas 10 mensagens para contexto)
+const chatHistory = {};
+
+async function getAIResponse(userId, userMessage) {
+  if (!chatHistory[userId]) chatHistory[userId] = [];
+
+  chatHistory[userId].push({ role: 'user', content: userMessage });
+
+  // Mantém no máximo 10 trocas
+  if (chatHistory[userId].length > 20) {
+    chatHistory[userId] = chatHistory[userId].slice(-20);
+  }
+
+  const response = await anthropic.messages.create({
+    model: 'claude-opus-4-5',
+    max_tokens: 1024,
+    system: CONFIG.SYSTEM_PROMPT,
+    messages: chatHistory[userId],
+  });
+
+  const reply = response.content[0].text;
+  chatHistory[userId].push({ role: 'assistant', content: reply });
+
+  return reply;
+}
+
+async function connectToWhatsApp() {
+  const { state, saveCreds } = await useMultiFileAuthState('auth_info');
+  const { version } = await fetchLatestBaileysVersion();
+
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    logger: pino({ level: 'silent' }),
+    printQRInTerminal: true,
+    browser: ['Hafy Bot', 'Chrome', '1.0.0'],
+  });
+
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+    if (qr) {
+      console.log('\n📱 Escaneie o QR Code acima com o WhatsApp\n');
+    }
+    if (connection === 'open') {
+      console.log(`✅ ${CONFIG.BOT_NAME} conectado ao WhatsApp!`);
+    }
+    if (connection === 'close') {
+      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+      console.log('🔄 Conexão encerrada. Reconectando:', shouldReconnect);
+      if (shouldReconnect) connectToWhatsApp();
+    }
+  });
+
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+
+    for (const msg of messages) {
+      try {
+        // Ignora mensagens próprias e sem conteúdo
+        if (msg.key.fromMe || !msg.message) continue;
+
+        const isGroup = msg.key.remoteJid?.endsWith('@g.us');
+        if (!isGroup) continue;
+
+        // Busca metadados do grupo
+        const groupMeta = await sock.groupMetadata(msg.key.remoteJid);
+        if (groupMeta.subject !== CONFIG.GROUP_NAME) continue;
+
+        // Extrai texto da mensagem
+        const text = msg.message?.conversation
+          || msg.message?.extendedTextMessage?.text
+          || msg.message?.imageMessage?.caption
+          || '';
+
+        if (!text) continue;
+
+        // Verifica trigger
+        const shouldRespond = CONFIG.RESPOND_TO_ALL
+          || text.toLowerCase().includes(CONFIG.BOT_TRIGGER.toLowerCase());
+
+        if (!shouldRespond) continue;
+
+        // Remove o trigger do texto antes de enviar à IA
+        const cleanText = text.replace(new RegExp(CONFIG.BOT_TRIGGER, 'gi'), '').trim();
+        if (!cleanText) continue;
+
+        const senderId = msg.key.participant || msg.key.remoteJid;
+        const senderName = msg.pushName || 'Usuário';
+
+        console.log(`💬 [${groupMeta.subject}] ${senderName}: ${cleanText}`);
+
+        // Envia "digitando..."
+        await sock.sendPresenceUpdate('composing', msg.key.remoteJid);
+
+        const aiReply = await getAIResponse(senderId, `${senderName} perguntou: ${cleanText}`);
+
+        // Responde mencionando a mensagem original
+        await sock.sendMessage(msg.key.remoteJid, {
+          text: `🤖 *${CONFIG.BOT_NAME}*\n\n${aiReply}`,
+        }, { quoted: msg });
+
+        console.log(`✅ Respondido para ${senderName}`);
+
+      } catch (err) {
+        console.error('❌ Erro ao processar mensagem:', err.message);
+      }
+    }
+  });
+}
+
+console.log(`🚀 Iniciando ${CONFIG.BOT_NAME}...`);
+connectToWhatsApp();
