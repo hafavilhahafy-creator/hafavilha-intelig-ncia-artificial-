@@ -1,0 +1,14 @@
+{
+  "name": "hafy-whatsapp-bot",
+  "version": "1.0.0",
+  "description": "Hafy AI - Bot WhatsApp com IA Anthropic",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "@anthropic-ai/sdk": "^0.24.0",
+    "pino": "^8.21.0"
+  }
+}
